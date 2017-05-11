@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace FuckBattlEye
@@ -14,24 +15,22 @@ namespace FuckBattlEye
         {
             Process.EnterDebugMode(); // GET SeDebugPrivilege
             Process procTarget = Process.GetProcessesByName(szProcessName)[0];
-            
-            var HandleList = EnumHandles(procTarget.Id, 0x1fffff /*FULL_CONTROL*/);
+
+            var HandleList = EnumHandles(procTarget.Id, 0x10/*VM_READ*/ & 0x20/*VM_WRITE*/); /*0x1fffff FULL_CONTROL*/
 
             if (HandleList.Count > 0)
             {
                 foreach (var HandleInformation in HandleList)
                 {
-                    if (HandleInformation.Id == Process.GetCurrentProcess().Id)
-                        continue;
-
                     Process procService = Process.GetProcessById(HandleInformation.Id);
 
                     Console.WriteLine($"{procService.ProcessName} - {HandleInformation.hProcess.ToString("x2")}");
-
+                    
                     if (ElevateHandle(procService.Handle, HandleInformation.hProcess, true, true))
                     {
                         IntPtr hProcess = StartProcessAsUser(null, $"{szCheatPath} {HandleInformation.hProcess}", null, true, procService.Handle);
                         ElevateHandle(procService.Handle, HandleInformation.hProcess, false, false);
+                        break;
                     }
                 }
             }
@@ -42,20 +41,20 @@ namespace FuckBattlEye
             Win32.STARTUPINFOEX si = new Win32.STARTUPINFOEX();
             Win32.PROCESS_INFORMATION pi = new Win32.PROCESS_INFORMATION();
             Win32.SECURITY_ATTRIBUTES sa = new Win32.SECURITY_ATTRIBUTES();
-            
+
             IntPtr processToken = IntPtr.Zero, userToken, cbAttributeListSize = IntPtr.Zero;
-            
+
             Win32.OpenProcessToken(new IntPtr(-1), (uint)Win32.TOKEN_ACCESS.TOKEN_ALL_ACCESS, ref processToken);
             Win32.DuplicateTokenEx(processToken, (uint)Win32.TOKEN_ACCESS.TOKEN_ALL_ACCESS, out sa, Win32.SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation, Win32.TOKEN_TYPE.TokenPrimary, out userToken);
             Win32.InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref cbAttributeListSize);
-            
+
             IntPtr pAttributeList = Win32.VirtualAlloc(IntPtr.Zero, (int)cbAttributeListSize, 0x1000, 0x40);
             Win32.InitializeProcThreadAttributeList(pAttributeList, 1, 0, ref cbAttributeListSize);
             Win32.UpdateProcThreadAttribute(pAttributeList, 0, (IntPtr)0x00020000, ref hParent, (IntPtr)Marshal.SizeOf(hParent), IntPtr.Zero, IntPtr.Zero);
-            
+
             si.lpAttributeList = pAttributeList;
             si.StartupInfo = new Win32.STARTUPINFO();
-            
+
             Win32.CreateProcessAsUserA(userToken, szFile, szArguments, IntPtr.Zero, IntPtr.Zero, Inherit, 0x400 | 0x010 | 0x00080000, IntPtr.Zero, szDirectory, ref si, ref pi);
 
             Win32.CloseHandle(processToken);
@@ -64,7 +63,7 @@ namespace FuckBattlEye
             Win32.VirtualFree(pAttributeList, 0x1000, 0x8000);
 
             return pi.hProcess;
-            
+
         }
 
         struct ShellcodeArguments
@@ -81,47 +80,43 @@ namespace FuckBattlEye
                 0x24, 0x31, 0x0F, 0xB6, 0x41, 0x0C, 0x4C, 0x8B, 0xD1, 0x48, 0x8B, 0x09, 0x88, 0x44, 0x24, 0x30, 0x41, 0x8D, 0x51, 0x02, 0x41,
                 0xFF, 0x52, 0x10, 0x33, 0xC9, 0x85, 0xC0, 0x0F, 0x94, 0xC1, 0x8B, 0xC1, 0x48, 0x83, 0xC4, 0x28, 0xC3 };
 
-            ShellcodeArguments Args = new ShellcodeArguments {
+            ShellcodeArguments Args = new ShellcodeArguments
+            {
                 hObject = hObject,
                 IStatus = Inherit,
                 PStatus = Protect,
                 pfnNtSetInformationObject = Win32.GetProcAddress(Win32.GetModuleHandleA("ntdll.dll"), "NtSetInformationObject")
             };
 
-            IntPtr WArgs = Marshal.AllocHGlobal(IntPtr.Size);
-            Marshal.StructureToPtr(Args, WArgs, true);
-
-            IntPtr lpThread = Win32.VirtualAllocEx(hProcess, IntPtr.Zero, 0x1000, 0x1000, 0x40);
-            IntPtr lpArgs = Win32.VirtualAllocEx(hProcess, IntPtr.Zero, 0x1000, 0x1000, 0x40);
-
-            if (lpThread == IntPtr.Zero || lpArgs == IntPtr.Zero)
-                return Cleanup(hProcess, lpThread, lpArgs, WArgs);
-
-            fixed (byte* pShellcode = W64ThreadShellcode)
-            {
-                if (!Win32.WriteProcessMemory(hProcess, lpThread, (IntPtr)pShellcode, W64ThreadShellcode.Length, IntPtr.Zero))
-                    return Cleanup(hProcess, lpThread, lpArgs, WArgs);
-
-                if (!Win32.WriteProcessMemory(hProcess, lpArgs, WArgs, Marshal.SizeOf(Args), IntPtr.Zero))
-                    return Cleanup(hProcess, lpThread, lpArgs, WArgs);
-            }
-            
-            IntPtr hThread = IntPtr.Zero;
-            if (Win32.RtlCreateUserThread(hProcess, IntPtr.Zero, false, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, lpThread, lpArgs, ref hThread, IntPtr.Zero) != 0/*STATUS_SUCCESS*/)
-                return Cleanup(hProcess, lpThread, lpArgs, WArgs);
-
-            Win32.WaitForSingleObject(hThread, 0xFFFFFFFF);
-            Win32.CloseHandle(hThread);
-            Cleanup(hProcess, lpThread, lpArgs, WArgs);
+             IntPtr WArgs = Marshal.AllocHGlobal(Marshal.SizeOf(Args));
+             Marshal.StructureToPtr(Args, WArgs, false);
+             
+             IntPtr lpThread = Win32.VirtualAllocEx(hProcess, IntPtr.Zero, 0x1000, 0x1000, 0x40);
+             IntPtr lpArgs = Win32.VirtualAllocEx(hProcess, IntPtr.Zero, 0x1000, 0x1000, 0x40);
+             
+             if (lpThread == IntPtr.Zero || lpArgs == IntPtr.Zero)
+                 return false;
+                 
+             fixed (byte* pShellcode = W64ThreadShellcode)
+             {
+                 if (!Win32.WriteProcessMemory(hProcess, lpThread, (IntPtr)pShellcode, W64ThreadShellcode.Length, IntPtr.Zero))
+                     return false;
+             
+                 if (!Win32.WriteProcessMemory(hProcess, lpArgs, WArgs, Marshal.SizeOf(Args), IntPtr.Zero))
+                     return false;
+             }
+             
+             IntPtr hThread = IntPtr.Zero;
+             if (Win32.RtlCreateUserThread(hProcess, IntPtr.Zero, false, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, lpThread, lpArgs, ref hThread, IntPtr.Zero) != 0/*STATUS_SUCCESS*/)
+                 return false;
+             
+             Win32.WaitForSingleObject(hThread, 0xFFFFFFFF);
+             Win32.CloseHandle(hThread);
+             Marshal.FreeHGlobal(WArgs);
+             Win32.VirtualFreeEx(hProcess, lpThread, 0x1000, 0x8000);
+             Win32.VirtualFreeEx(hProcess, lpArgs, 0x1000, 0x8000);
 
             return true;
-        }
-        private static bool Cleanup(IntPtr hProcess, IntPtr lpThread, IntPtr lpArgs, IntPtr WArgs)
-        {
-            Marshal.FreeHGlobal(WArgs);
-            Win32.VirtualFreeEx(hProcess, lpThread, 0x1000, 0x8000);
-            Win32.VirtualFreeEx(hProcess, lpArgs, 0x1000, 0x8000);
-            return false;
         }
 
         public struct SYSTEM_HANDLE_INFORMATION
@@ -132,7 +127,7 @@ namespace FuckBattlEye
         public static List<SYSTEM_HANDLE_INFORMATION> EnumHandles(int nProcessId, int DesiredAccess)
         {
             int nBufferLength = 0;
-            IntPtr pInfo = IntPtr.Zero;//Marshal.AllocHGlobal(nBufferLength);
+            IntPtr pInfo = IntPtr.Zero;
 
             long ntstatus = -1;
 
@@ -142,7 +137,9 @@ namespace FuckBattlEye
                 
                 if (ntstatus == 0xC0000004/*STATUS_INFO_LENGTH_MISMATCH*/)
                 {
-                    Marshal.FreeHGlobal(pInfo);
+                    if (pInfo != IntPtr.Zero)
+                        Marshal.FreeHGlobal(pInfo);
+
                     pInfo = Marshal.AllocHGlobal(nBufferLength);
                 }
                 else if (ntstatus != 0) // DON'T ALERT ON NT_SUCCESS :)
@@ -154,15 +151,18 @@ namespace FuckBattlEye
             }
 
             long lHandleCount = Marshal.ReadInt64(pInfo);
-            IntPtr LpHandle = pInfo + sizeof(long);
+            IntPtr lpHandle = pInfo + sizeof(long);
+
+            Console.WriteLine($"lHandleCount: {lHandleCount}");
+            Console.WriteLine($"lpHandle: {lpHandle.ToString("x2")}");
 
             List<SYSTEM_HANDLE_INFORMATION> ResultHandles = new List<SYSTEM_HANDLE_INFORMATION>();
 
             for (int i = 0; i < lHandleCount; i++)
             {
-                var CurrentHandle = (Win32.SYSTEM_HANDLE)Marshal.PtrToStructure(LpHandle, typeof(Win32.SYSTEM_HANDLE));
+                var CurrentHandle = (Win32.SYSTEM_HANDLE)Marshal.PtrToStructure(lpHandle, typeof(Win32.SYSTEM_HANDLE));
 
-                LpHandle += Marshal.SizeOf(CurrentHandle);
+                lpHandle += Marshal.SizeOf(CurrentHandle);
 
                 IntPtr hProcess = Win32.OpenProcess(0x40, false, CurrentHandle.ProcessID);
 
@@ -177,6 +177,8 @@ namespace FuckBattlEye
                 }
             }
 
+            Marshal.FreeHGlobal(pInfo);
+            
             return ResultHandles;
         }
 
@@ -271,8 +273,7 @@ namespace FuckBattlEye
             }
 
             #endregion
-
-
+            
             // KERNEL32
             [DllImport("kernel32.dll")]
             public static extern bool CloseHandle(IntPtr hObject);
