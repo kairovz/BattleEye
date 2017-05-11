@@ -131,26 +131,40 @@ namespace FuckBattlEye
         }
         public static List<SYSTEM_HANDLE_INFORMATION> EnumHandles(int nProcessId, int DesiredAccess)
         {
-            int nBufferLength = 0x10000;
-            IntPtr pInfo = Marshal.AllocHGlobal(nBufferLength);
-            while (Win32.NtQuerySystemInformation(0x0010/*HANDLE INFORMATION*/, pInfo, nBufferLength, ref nBufferLength) == 0xc0000004/*STATUS_INFO_LENGTH_MISMATCH*/)
+            int nBufferLength = 0;
+            IntPtr pInfo = IntPtr.Zero;//Marshal.AllocHGlobal(nBufferLength);
+
+            long ntstatus = -1;
+
+            while (ntstatus != 0/*NT_SUCCESS*/)
             {
-                Marshal.FreeHGlobal(pInfo);
-                pInfo = Marshal.AllocHGlobal(nBufferLength);
+                ntstatus = Win32.NtQuerySystemInformation(0x10/*HANDLE INFORMATION*/, pInfo, nBufferLength, ref nBufferLength);
+                
+                if (ntstatus == 0xC0000004/*STATUS_INFO_LENGTH_MISMATCH*/)
+                {
+                    Marshal.FreeHGlobal(pInfo);
+                    pInfo = Marshal.AllocHGlobal(nBufferLength);
+                }
+                else if (ntstatus != 0) // DON'T ALERT ON NT_SUCCESS :)
+                {
+                    Console.WriteLine($"Unknown NT_STATUS: {ntstatus.ToString("x2")}");
+                    Console.ReadLine();
+                    Environment.Exit(0);
+                }
             }
-            
+
             long lHandleCount = Marshal.ReadInt64(pInfo);
-            IntPtr pHandle = pInfo + sizeof(long);
-            
+            IntPtr LpHandle = pInfo + sizeof(long);
+
             List<SYSTEM_HANDLE_INFORMATION> ResultHandles = new List<SYSTEM_HANDLE_INFORMATION>();
 
             for (int i = 0; i < lHandleCount; i++)
             {
-                var CurrentHandle = (Win32.SYSTEM_HANDLE)Marshal.PtrToStructure(pHandle, typeof(Win32.SYSTEM_HANDLE));
+                var CurrentHandle = (Win32.SYSTEM_HANDLE)Marshal.PtrToStructure(LpHandle, typeof(Win32.SYSTEM_HANDLE));
 
-                pHandle += Marshal.SizeOf(CurrentHandle);
-                
-                IntPtr hProcess = Win32.OpenProcess(0x0040, false, CurrentHandle.ProcessID);
+                LpHandle += Marshal.SizeOf(CurrentHandle);
+
+                IntPtr hProcess = Win32.OpenProcess(0x40, false, CurrentHandle.ProcessID);
 
                 IntPtr hCopiedProcessHandle = IntPtr.Zero;
                 if (Win32.DuplicateHandle(hProcess, (IntPtr)CurrentHandle.Handle, new IntPtr(-1), ref hCopiedProcessHandle, 0, false, 2))
@@ -162,7 +176,7 @@ namespace FuckBattlEye
                     }
                 }
             }
-            
+
             return ResultHandles;
         }
 
